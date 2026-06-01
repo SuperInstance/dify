@@ -392,14 +392,14 @@ export type McpProviderCreatePayload = {
   configuration?: {
     [key: string]: unknown
   } | null
-  forward_user_identity?: boolean
+  forward_user_identity?: boolean | null
   headers?: {
     [key: string]: unknown
   } | null
   icon: string
   icon_background?: string
   icon_type: string
-  identity_mode?: 'idp_token' | 'off'
+  identity_mode?: 'idp_token' | 'off' | null
   name: string
   server_identifier: string
   server_url: string
@@ -412,14 +412,14 @@ export type McpProviderUpdatePayload = {
   configuration?: {
     [key: string]: unknown
   } | null
-  forward_user_identity?: boolean
+  forward_user_identity?: boolean | null
   headers?: {
     [key: string]: unknown
   } | null
   icon: string
   icon_background?: string
   icon_type: string
-  identity_mode?: 'idp_token' | 'off'
+  identity_mode?: 'idp_token' | 'off' | null
   name: string
   provider_id: string
   server_identifier: string
