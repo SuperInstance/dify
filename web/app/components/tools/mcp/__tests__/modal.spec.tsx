@@ -30,6 +30,17 @@ vi.mock('@langgenius/dify-ui/toast', () => ({
   },
 }))
 
+// systemFeatures gate for the Forward-user-identity toggle. Default SSO off
+// (matches pre-Enterprise installations); tests that need the toggle enabled
+// flip `mockSystemFeatures.sso_enforced_for_signin = true`.
+const mockSystemFeatures = vi.hoisted(() => ({ sso_enforced_for_signin: false }))
+vi.mock('@/service/system-features', () => ({
+  systemFeaturesQueryOptions: () => ({
+    queryKey: ['mock-system-features'],
+    queryFn: async () => mockSystemFeatures,
+  }),
+}))
+
 describe('MCPModal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -43,6 +54,9 @@ describe('MCPModal', () => {
         },
       },
     })
+    // useSuspenseQuery(systemFeaturesQueryOptions) reads from this key —
+    // pre-populate so the modal renders synchronously instead of suspending.
+    queryClient.setQueryData(['mock-system-features'], mockSystemFeatures)
     return ({ children }: { children: ReactNode }) =>
       React.createElement(QueryClientProvider, { client: queryClient }, children)
   }
@@ -717,6 +731,127 @@ describe('MCPModal', () => {
           expect(screen.queryByPlaceholderText('Search emojis...')).not.toBeInTheDocument()
         })
       }
+    })
+  })
+
+  // M3 — Forward-user-identity toggle (PR #36840).
+  describe('Forward-user-identity toggle', () => {
+    beforeEach(() => {
+      // Default state: SSO not configured.
+      mockSystemFeatures.sso_enforced_for_signin = false
+    })
+
+    const fillRequiredFields = () => {
+      fireEvent.change(
+        screen.getByPlaceholderText('tools.mcp.modal.serverUrlPlaceholder'),
+        { target: { value: 'https://example.com/mcp' } },
+      )
+      fireEvent.change(
+        screen.getByPlaceholderText('tools.mcp.modal.namePlaceholder'),
+        { target: { value: 'srv' } },
+      )
+      fireEvent.change(
+        screen.getByPlaceholderText('tools.mcp.modal.serverIdentifierPlaceholder'),
+        { target: { value: 'srv-id' } },
+      )
+    }
+
+    it('renders the toggle label and helper text', () => {
+      render(<MCPModal {...defaultProps} />, { wrapper: createWrapper() })
+      expect(screen.getByText('tools.mcp.modal.forwardUserIdentity')).toBeInTheDocument()
+    })
+
+    it('shows the "unavailable" helper when SSO is not configured', () => {
+      mockSystemFeatures.sso_enforced_for_signin = false
+      render(<MCPModal {...defaultProps} />, { wrapper: createWrapper() })
+      expect(
+        screen.getByText('tools.mcp.modal.forwardUserIdentityUnavailable'),
+      ).toBeInTheDocument()
+    })
+
+    it('shows the normal helper tip when SSO is configured', () => {
+      mockSystemFeatures.sso_enforced_for_signin = true
+      render(<MCPModal {...defaultProps} />, { wrapper: createWrapper() })
+      expect(
+        screen.getByText('tools.mcp.modal.forwardUserIdentityTip'),
+      ).toBeInTheDocument()
+    })
+
+    it('submits identity_mode="off" by default (toggle off)', async () => {
+      mockSystemFeatures.sso_enforced_for_signin = true
+      const onConfirm = vi.fn()
+      render(
+        <MCPModal {...defaultProps} onConfirm={onConfirm} />,
+        { wrapper: createWrapper() },
+      )
+
+      fillRequiredFields()
+      fireEvent.click(screen.getByText('tools.mcp.modal.confirm'))
+
+      await waitFor(() => {
+        expect(onConfirm).toHaveBeenCalledWith(
+          expect.objectContaining({
+            forward_user_identity: false,
+            identity_mode: 'off',
+          }),
+        )
+      })
+    })
+
+    it('submits identity_mode="idp_token" when toggle is flipped on with SSO available', async () => {
+      mockSystemFeatures.sso_enforced_for_signin = true
+      const onConfirm = vi.fn()
+      render(
+        <MCPModal {...defaultProps} onConfirm={onConfirm} />,
+        { wrapper: createWrapper() },
+      )
+
+      fillRequiredFields()
+      // The Switch is labelled by `mcp-forward-user-identity-label`; the
+      // base-ui Switch primitive renders as role="switch".
+      const fwdSwitch = screen.getByRole('switch', {
+        name: 'tools.mcp.modal.forwardUserIdentity',
+      })
+      fireEvent.click(fwdSwitch)
+      fireEvent.click(screen.getByText('tools.mcp.modal.confirm'))
+
+      await waitFor(() => {
+        expect(onConfirm).toHaveBeenCalledWith(
+          expect.objectContaining({
+            forward_user_identity: true,
+            identity_mode: 'idp_token',
+          }),
+        )
+      })
+    })
+
+    it('forces forward_user_identity=false on submit when SSO is unavailable, even if data had it on', async () => {
+      mockSystemFeatures.sso_enforced_for_signin = false
+      const onConfirm = vi.fn()
+      const mockData = {
+        id: 'existing-1',
+        name: 'srv',
+        server_url: 'https://example.com/mcp',
+        server_identifier: 'srv-id',
+        icon: { content: '🔗', background: '#6366F1' },
+        forward_user_identity: true,
+        identity_mode: 'idp_token',
+      } as unknown as ToolWithProvider
+
+      render(
+        <MCPModal {...defaultProps} data={mockData} onConfirm={onConfirm} />,
+        { wrapper: createWrapper() },
+      )
+      fireEvent.click(screen.getByText('tools.mcp.modal.save'))
+
+      await waitFor(() => {
+        expect(onConfirm).toHaveBeenCalledWith(
+          expect.objectContaining({
+            forward_user_identity: false,
+            identity_mode: 'off',
+          }),
+        )
+      })
     })
   })
 })

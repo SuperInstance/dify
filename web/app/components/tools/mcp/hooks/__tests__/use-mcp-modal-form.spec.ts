@@ -497,4 +497,51 @@ describe('useMCPModalForm', () => {
       expect(((result.current.state.appIcon) as AppIconImageSelection).url).toBe('https://example.com/icon.png')
     })
   })
+
+  // M3 — Forward-user-identity toggle (PR #36840). The hook stores a bool,
+  // hydrates it from data.forward_user_identity, and exposes a setter.
+  describe('Forward-user-identity toggle', () => {
+    it('defaults to false in create mode', () => {
+      const { result } = renderHook(() => useMCPModalForm())
+      expect(result.current.state.forwardUserIdentity).toBe(false)
+    })
+
+    it('hydrates from data.forward_user_identity=true in edit mode', () => {
+      const mockData = {
+        id: 'existing-1',
+        icon: { content: '🔗', background: '#6366F1' },
+        forward_user_identity: true,
+        identity_mode: 'idp_token',
+      } as unknown as ToolWithProvider
+
+      const { result } = renderHook(() => useMCPModalForm(mockData))
+      expect(result.current.state.forwardUserIdentity).toBe(true)
+    })
+
+    it('hydrates as false when data.forward_user_identity is missing or falsy', () => {
+      const mockData = {
+        id: 'existing-2',
+        icon: { content: '🔗', background: '#6366F1' },
+        // forward_user_identity intentionally omitted
+      } as unknown as ToolWithProvider
+
+      const { result } = renderHook(() => useMCPModalForm(mockData))
+      expect(result.current.state.forwardUserIdentity).toBe(false)
+    })
+
+    it('updates state via setForwardUserIdentity', () => {
+      const { result } = renderHook(() => useMCPModalForm())
+      expect(result.current.state.forwardUserIdentity).toBe(false)
+
+      act(() => {
+        result.current.actions.setForwardUserIdentity(true)
+      })
+      expect(result.current.state.forwardUserIdentity).toBe(true)
+
+      act(() => {
+        result.current.actions.setForwardUserIdentity(false)
+      })
+      expect(result.current.state.forwardUserIdentity).toBe(false)
+    })
+  })
 })
