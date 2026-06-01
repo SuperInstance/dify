@@ -356,41 +356,6 @@ export const zMcpProviderDeletePayload = z.object({
 })
 
 /**
- * MCPProviderCreatePayload
- */
-export const zMcpProviderCreatePayload = z.object({
-  authentication: z.record(z.string(), z.unknown()).nullish(),
-  configuration: z.record(z.string(), z.unknown()).nullish(),
-  forward_user_identity: z.boolean().nullish(),
-  headers: z.record(z.string(), z.unknown()).nullish(),
-  icon: z.string(),
-  icon_background: z.string().optional().default(''),
-  icon_type: z.string(),
-  identity_mode: z.enum(['idp_token', 'off']).nullish(),
-  name: z.string(),
-  server_identifier: z.string(),
-  server_url: z.string(),
-})
-
-/**
- * MCPProviderUpdatePayload
- */
-export const zMcpProviderUpdatePayload = z.object({
-  authentication: z.record(z.string(), z.unknown()).nullish(),
-  configuration: z.record(z.string(), z.unknown()).nullish(),
-  forward_user_identity: z.boolean().nullish(),
-  headers: z.record(z.string(), z.unknown()).nullish(),
-  icon: z.string(),
-  icon_background: z.string().optional().default(''),
-  icon_type: z.string(),
-  identity_mode: z.enum(['idp_token', 'off']).nullish(),
-  name: z.string(),
-  provider_id: z.string(),
-  server_identifier: z.string(),
-  server_url: z.string(),
-})
-
-/**
  * MCPAuthPayload
  */
 export const zMcpAuthPayload = z.object({
@@ -700,6 +665,53 @@ export const zBuiltinToolAddPayload = z.object({
   credentials: z.record(z.string(), z.unknown()),
   name: z.string().max(30).nullish(),
   type: zCredentialType,
+})
+
+/**
+ * IdentityMode
+ *
+ * How Dify forwards the calling end-user's identity to an MCP server.
+ *
+ * Adding a new mechanism (e.g. RFC 8693 token exchange) is a one-line
+ * addition here — every downstream layer accepts this enum, so we don't
+ * need to touch the model, controller payload, service, runtime, and
+ * Pydantic boundary individually.
+ */
+export const zIdentityMode = z.enum(['idp_token', 'off'])
+
+/**
+ * MCPProviderCreatePayload
+ */
+export const zMcpProviderCreatePayload = z.object({
+  authentication: z.record(z.string(), z.unknown()).nullish(),
+  configuration: z.record(z.string(), z.unknown()).nullish(),
+  forward_user_identity: z.boolean().nullish(),
+  headers: z.record(z.string(), z.unknown()).nullish(),
+  icon: z.string(),
+  icon_background: z.string().optional().default(''),
+  icon_type: z.string(),
+  identity_mode: zIdentityMode.optional(),
+  name: z.string(),
+  server_identifier: z.string(),
+  server_url: z.string(),
+})
+
+/**
+ * MCPProviderUpdatePayload
+ */
+export const zMcpProviderUpdatePayload = z.object({
+  authentication: z.record(z.string(), z.unknown()).nullish(),
+  configuration: z.record(z.string(), z.unknown()).nullish(),
+  forward_user_identity: z.boolean().nullish(),
+  headers: z.record(z.string(), z.unknown()).nullish(),
+  icon: z.string(),
+  icon_background: z.string().optional().default(''),
+  icon_type: z.string(),
+  identity_mode: zIdentityMode.optional(),
+  name: z.string(),
+  provider_id: z.string(),
+  server_identifier: z.string(),
+  server_url: z.string(),
 })
 
 /**

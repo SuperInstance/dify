@@ -13486,6 +13486,19 @@ Request payload for bulk downloading documents as a zip archive.
 | ---- | ---- | ----------- | -------- |
 | IconType | string |  |  |
 
+#### IdentityMode
+
+How Dify forwards the calling end-user's identity to an MCP server.
+
+Adding a new mechanism (e.g. RFC 8693 token exchange) is a one-line
+addition here — every downstream layer accepts this enum, so we don't
+need to touch the model, controller payload, service, runtime, and
+Pydantic boundary individually.
+
+| Name | Type | Description | Required |
+| ---- | ---- | ----------- | -------- |
+| IdentityMode | string | How Dify forwards the calling end-user's identity to an MCP server.  Adding a new mechanism (e.g. RFC 8693 token exchange) is a one-line addition here — every downstream layer accepts this enum, so we don't need to touch the model, controller payload, service, runtime, and Pydantic boundary individually. |  |
+
 #### Import
 
 | Name | Type | Description | Required |
@@ -13766,7 +13779,7 @@ Enum class for large language model mode.
 | icon | string |  | Yes |
 | icon_background | string |  | No |
 | icon_type | string |  | Yes |
-| identity_mode | string | *Enum:* `"idp_token"`, `"off"` | No |
+| identity_mode | [IdentityMode](#identitymode) |  | No |
 | name | string |  | Yes |
 | server_identifier | string |  | Yes |
 | server_url | string |  | Yes |
@@ -13788,7 +13801,7 @@ Enum class for large language model mode.
 | icon | string |  | Yes |
 | icon_background | string |  | No |
 | icon_type | string |  | Yes |
-| identity_mode | string | *Enum:* `"idp_token"`, `"off"` | No |
+| identity_mode | [IdentityMode](#identitymode) |  | No |
 | name | string |  | Yes |
 | provider_id | string |  | Yes |
 | server_identifier | string |  | Yes |
