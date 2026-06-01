@@ -209,15 +209,8 @@ class MCPProviderBasePayload(BaseModel):
     configuration: dict[str, Any] | None = Field(default_factory=dict)
     headers: dict[str, Any] | None = Field(default_factory=dict)
     authentication: dict[str, Any] | None = Field(default_factory=dict)
-    # M3 — user-identity forwarding (M2 backend supports these on the service
-    # layer). `None` means "leave unchanged" — matches the service-layer
-    # contract for update_provider, so a PATCH that omits these fields will
-    # NOT reset an already-on toggle. The create path defaults `None` to
-    # `False` / IdentityMode.OFF at the call site below.
-    #
-    # Pydantic validates against the IdentityMode enum, so adding a future
-    # mode (e.g. "token_exchange") is a single-line addition to the enum —
-    # the API boundary picks it up automatically.
+    # None means "leave unchanged" on PATCH; the create path coalesces to
+    # safe defaults at the call site below.
     forward_user_identity: bool | None = None
     identity_mode: IdentityMode | None = None
 
@@ -996,7 +989,6 @@ class ToolProviderMCPApi(Resource):
                 headers=payload.headers or {},
                 configuration=configuration,
                 authentication=authentication,
-                # Create path: None → safe pre-M3 defaults.
                 forward_user_identity=payload.forward_user_identity or False,
                 identity_mode=payload.identity_mode or IdentityMode.OFF,
             )

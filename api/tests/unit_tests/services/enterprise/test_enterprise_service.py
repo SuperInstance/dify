@@ -486,8 +486,6 @@ class TestIssueMCPToken:
         )
 
     def test_happy_path_returns_token_and_expiry(self):
-        from services.enterprise.base import MCPTokenError  # noqa: F401  (exercised by negative tests)
-
         with patch(f"{MODULE}.EnterpriseRequest") as req:
             req.send_request.return_value = {"token": "abc.def.ghi", "expires_at": 1900000000}
             token, exp = self._call()

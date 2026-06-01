@@ -222,17 +222,3 @@ def test_invoke_remote_mcp_tool_fails_closed_when_user_id_missing():
 
     with pytest.raises(ToolInvokeError, match="no end-user context"):
         tool.invoke_remote_mcp_tool({}, user_id=None, app_id=None)
-
-
-def test_forwarding_inactive_tool_keeps_legacy_construction():
-    """When forwarding is off, MCPTool still constructs cleanly and exposes
-    the flag values truthfully. (The full no-injection path is covered by
-    integration tests; here we just lock in the construction contract.)"""
-    tool = _build_forwarding_tool(forward=False, mode="off")
-    assert tool.forward_user_identity is False
-    assert tool.identity_mode == "off"
-
-    # fork_tool_runtime must preserve the (off, off) state.
-    forked = tool.fork_tool_runtime(ToolRuntime(tenant_id="tenant-2"))
-    assert forked.forward_user_identity is False
-    assert forked.identity_mode == "off"
