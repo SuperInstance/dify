@@ -211,36 +211,191 @@ At the same time, please consider supporting Dify by sharing it on social media 
 
 ## 🏆 SuperInstance Enhancement: Budget Watchdog
 
-> **Same Dify. Won't bankrupt your team.**
+47 AI workflows. $12,000 API bill. Nobody knows which workflow cost what.
 
-The Budget Watchdog adds API spending limits to Dify. Set per-workflow and team-level budgets, get warned before you exceed them, and let models auto-downgrade when you're getting close.
+The Budget Watchdog tracks per-workflow token and cost consumption, auto-downgrades models when budgets approach their limit, and surfaces exactly who spent what.
 
-### Key Features
+### 1. Hook it up
 
-- **Per-workflow token/cost tracking** with daily/weekly/monthly windows
-- **Three-phase enforcement**: 60% warning → 85% throttle → 100% stop
-- **Auto-downgrade**: GPT-4o → GPT-4o-mini → GPT-3.5 Turbo (and Claude, Gemini, Llama chains)
-- **Team budget aggregation** with per-member quotas
-- **Alert store** with ring buffer for audit trail
-- **REST API** for configuration and inspection
-- **GraphEngine layer** hooks into existing workflow execution alongside LLMQuotaLayer
+Add the layer to your workflow engine:
 
-### Quick Start
+```python
+from controllers.service_api.budget_watchdog.layer import BudgetWatchdogLayer
+
+# The watchdog sits alongside the existing LLMQuotaLayer
+self.graph_engine.layer(LLMQuotaLayer(tenant_id=tenant_id))
+self.graph_engine.layer(BudgetWatchdogLayer(tenant_id=tenant_id))
+```
+
+### 2. Configure a budget
+
+```python
+from controllers.service_api.budget_watchdog.budget import BudgetWindow, WorkflowBudget
+from controllers.service_api.budget_watchdog.model import ModelId
+
+budget = WorkflowBudget.create(
+    workflow_name="pdf-analyzer",
+    model=ModelId.CLAUDE_3_OPUS,   # $0.15/$0.75 per 1K tokens
+    token_limit=100_000,
+    cost_limit_cents=50_000,        # $500/day
+    window=BudgetWindow.DAILY,
+)
+```
+
+Or via the REST API:
 
 ```bash
-# Configure a workflow budget
 curl -X POST https://your-dify/v1/budgets \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{ "workflow_name": "customer-support", "model": "gpt-4o",
-        "token_limit": 1000000, "cost_limit_cents": 50000 }'
-
-# Check budget status
-curl https://your-dify/v1/budgets/customer-support \
-  -H "Authorization: Bearer YOUR_API_KEY"
+  -d '{
+    "workflow_name": "pdf-analyzer",
+    "model": "claude-3-opus",
+    "token_limit": 100000,
+    "cost_limit_cents": 50000
+  }'
 ```
 
-See [INTEGRATION.md](./INTEGRATION.md) for full documentation.
+### 3. Track team budgets
+
+```python
+from controllers.service_api.budget_watchdog.team import TeamBudget, TeamMember
+
+team = TeamBudget(
+    name="engineering",
+    team_token_limit=10_000_000,
+    team_cost_limit_cents=500_000,  # $5,000/30 days
+    period_days=30,
+)
+
+team.add_member(TeamMember("engineer-a@co.com", token_quota=2_000_000, cost_quota_cents=100_000))
+team.add_member(TeamMember("engineer-b@co.com", token_quota=2_000_000, cost_quota_cents=100_000))
+```
+
+### 4. Watch it downgrade automatically
+
+Workflow `pdf-analyzer` hit 85% of $500. The watchdog triggered the Transitioning phase:
+
+```python
+phase, downgraded = budget.spend_and_downgrade(tokens=85_000, cost_cents=42_500)
+assert phase == BudgetPhase.TRANSITIONING
+assert downgraded == ModelId.CLAUDE_3_SONNET  # Opus → Sonnet
+```
+
+Remaining requests for the day run on Claude 3 Sonnet ($0.03/$0.15 per 1K tokens) instead of Opus ($0.15/$0.75). That saves roughly **$127** per budget window at current usage patterns.
+
+### 5. The bill breakdown
+
+Query the watchdog for real numbers:
+
+```bash
+curl https://your-dify/v1/budgets | jq .
+```
+
+```json
+[
+  {
+    "workflow_name": "pdf-analyzer",
+    "model": "claude-3-sonnet",
+    "cost_limit_cents": 50000,
+    "cost_consumed_cents": 48000,
+    "cost_utilisation": 0.96,
+    "downgrade_count": 1,
+    "phase": "transitioning"
+  },
+  {
+    "workflow_name": "customer-support",
+    "cost_limit_cents": 30000,
+    "cost_consumed_cents": 7500,
+    "cost_utilisation": 0.25,
+    "phase": "normal"
+  },
+  {
+    "workflow_name": "data-extraction",
+    "cost_limit_cents": 25000,
+    "cost_consumed_cents": 24000,
+    "cost_utilisation": 0.96,
+    "phase": "transitioning"
+  }
+]
+```
+
+Team breakdown:
+
+```bash
+curl https://your-dify/v1/budgets/team | jq .
+```
+
+```json
+{
+  "name": "engineering",
+  "team_cost_limit_cents": 500000,
+  "team_cost_consumed_cents": 415000,
+  "team_token_utilisation": 0.83,
+  "member_count": 2,
+  "workflow_count": 3,
+  "members": [
+    {
+      "id": "engineer-a@co.com",
+      "cost_quota_cents": 100000,
+      "cost_consumed_cents": 78000,
+      "cost_utilisation": 0.78
+    },
+    {
+      "id": "engineer-b@co.com",
+      "cost_quota_cents": 100000,
+      "cost_consumed_cents": 55000,
+      "cost_utilisation": 0.55
+    }
+  ]
+}
+```
+
+**Engineer A**: $2,340 consumed. One workflow (pdf-analyzer) accounts for 40% of the total team bill.
+
+### Ah-ha
+
+That PDF analyzer costs more than everything else combined. The fix: switch Claude Opus → Sonnet when the PDF is over 10 pages. At current volume, that saves **$3,200/month**. The watchdog tells you exactly which workflow to fix — the data, not hunches.
+
+### Alert webhook payload
+
+When a budget transitions to PreTransition (≥60%) or Transitioning (≥85%), the watchdog fires alerts. Here's what gets sent:
+
+```json
+{
+  "alerts": [
+    {
+      "timestamp": "2026-06-02T01:15:00+00:00",
+      "workflow": "pdf-analyzer",
+      "level": "critical",
+      "message": "Workflow 'pdf-analyzer' — auto-downgraded from Claude 3 Opus to Claude 3 Sonnet"
+    },
+    {
+      "timestamp": "2026-06-02T00:30:00+00:00",
+      "workflow": "pdf-analyzer",
+      "level": "warning",
+      "message": "Workflow 'pdf-analyzer' at 72.5% token limit (72500/100000)"
+    },
+    {
+      "timestamp": "2026-06-02T00:00:00+00:00",
+      "workflow": "pdf-analyzer",
+      "level": "info",
+      "message": "Workflow 'pdf-analyzer' operating normally"
+    }
+  ]
+}
+```
+
+### What it does under the hood
+
+- Tracks token and cost consumption per workflow within configurable windows (daily/weekly/monthly)
+- Three-phase conservation model: **Normal** (<60%) → **PreTransition** (≥60%, logged) → **Transitioning** (≥85%, auto-downgrade)
+- When a window resets, the model upgrades back to the original
+- Downgrade chains per provider: Opus→Sonnet→Haiku, GPT-4o→GPT-4o-mini→GPT-3.5 Turbo, Gemini Pro→Flash, Llama 70B→8B
+- In-memory alert store with ring-buffer retention; swappable for Redis/PostgreSQL in production
+- All state lives on the `BudgetWatchdogLayer` class — configure once, enforce everywhere
+
+See [INTEGRATION.md](./INTEGRATION.md) for the full API reference and production migration guide.
 
 ---
 

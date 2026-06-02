@@ -90,7 +90,7 @@ class WorkflowBudget:
         # Check if exhausted
         if self.tokens_consumed >= self.token_limit or self.cost_consumed_cents >= self.cost_limit_cents:
             raise BudgetExceededError(
-                f"Workflow '{self.workflow_name}': tokens {self.tokens_consumed}/{self.token_limit} "
+                f"Workflow '{self.workflow_name}' exceeded: tokens {self.tokens_consumed}/{self.token_limit} "
                 f"or cost {self.cost_consumed_cents}/{self.cost_limit_cents}"
             )
 
