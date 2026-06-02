@@ -137,6 +137,13 @@ class WorkflowGenerateResultDict(TypedDict):
     envelope; ``errors`` carries the machine-readable codes so the frontend
     can localise the message and tie failures to specific nodes. On success
     both ``error == ""`` and ``errors == []``.
+
+    ``repair_attempts`` reports how many self-repair LLM rounds fired before
+    we returned this graph. 0 = the builder's first response was structurally
+    clean. 1 = the builder's first response failed validation and a single
+    repair round produced the graph in this envelope (whether that final
+    graph is itself clean or still has ``errors`` populated). Caps at 1 —
+    further rounds would burn quota for diminishing returns.
     """
 
     graph: GraphDict
@@ -145,3 +152,4 @@ class WorkflowGenerateResultDict(TypedDict):
     icon: str
     error: str
     errors: list[WorkflowGenerateErrorDict]
+    repair_attempts: int

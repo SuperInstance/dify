@@ -366,6 +366,325 @@ class TestWorkflowGeneratorFailurePaths:
         assert "ghost" in result["error"]
 
 
+class TestWorkflowGeneratorSelfRepair:
+    """
+    When the builder's first attempt fails structural validation we send the
+    errors + broken graph back to the model for ONE corrective round. These
+    tests pin down that:
+
+      a. clean generations don't fire the repair pass (no extra LLM call);
+      b. when the repair returns a fixed graph, the user sees a clean
+         envelope and ``repair_attempts == 1``;
+      c. when the repair also returns a broken graph (or fails to respond),
+         the original errors surface and we still report ``repair_attempts
+         == 1`` so monitoring can see that repair was attempted.
+    """
+
+    def test_repair_attempts_zero_on_clean_generation(self):
+        planner = json.dumps(
+            {
+                "title": "x",
+                "description": "x",
+                "nodes": [
+                    {"label": "Start", "node_type": "start", "purpose": "x"},
+                    {"label": "End", "node_type": "end", "purpose": "x"},
+                ],
+            }
+        )
+        builder = json.dumps(
+            {
+                "nodes": [
+                    {"id": "node1", "type": "custom", "position": {"x": 0, "y": 0}, "data": {"type": "start"}},
+                    {"id": "node2", "type": "custom", "position": {"x": 0, "y": 0}, "data": {"type": "end"}},
+                ],
+                "edges": [{"id": "x", "source": "node1", "target": "node2", "type": "custom"}],
+                "viewport": {"x": 0, "y": 0, "zoom": 0.7},
+            }
+        )
+        model_instance = MagicMock()
+        model_instance.invoke_llm.side_effect = [_llm_result(planner), _llm_result(builder)]
+
+        result = WorkflowGenerator.generate_workflow_graph(
+            model_instance=model_instance,
+            model_parameters={},
+            provider="openai",
+            model_name="gpt-4o",
+            model_mode="chat",
+            mode="workflow",
+            instruction="x",
+        )
+
+        # Clean generation: no repair, exactly two LLM calls (planner + builder).
+        assert result["errors"] == []
+        assert result["repair_attempts"] == 0
+        assert model_instance.invoke_llm.call_count == 2
+
+    def test_repair_fixes_dangling_edge(self):
+        planner = json.dumps(
+            {
+                "title": "x",
+                "description": "x",
+                "nodes": [
+                    {"label": "Start", "node_type": "start", "purpose": "x"},
+                    {"label": "End", "node_type": "end", "purpose": "x"},
+                ],
+            }
+        )
+        # First builder response has a dangling edge (target ``ghost``).
+        broken_builder = json.dumps(
+            {
+                "nodes": [
+                    {"id": "node1", "type": "custom", "position": {"x": 0, "y": 0}, "data": {"type": "start"}},
+                    {"id": "node2", "type": "custom", "position": {"x": 0, "y": 0}, "data": {"type": "end"}},
+                ],
+                "edges": [
+                    {"id": "x", "source": "node1", "target": "node2", "type": "custom"},
+                    {"id": "y", "source": "node1", "target": "ghost", "type": "custom"},
+                ],
+                "viewport": {"x": 0, "y": 0, "zoom": 0.7},
+            }
+        )
+        # Repair response drops the dangling edge.
+        repaired = json.dumps(
+            {
+                "nodes": [
+                    {"id": "node1", "type": "custom", "position": {"x": 0, "y": 0}, "data": {"type": "start"}},
+                    {"id": "node2", "type": "custom", "position": {"x": 0, "y": 0}, "data": {"type": "end"}},
+                ],
+                "edges": [{"id": "x", "source": "node1", "target": "node2", "type": "custom"}],
+                "viewport": {"x": 0, "y": 0, "zoom": 0.7},
+            }
+        )
+        model_instance = MagicMock()
+        model_instance.invoke_llm.side_effect = [
+            _llm_result(planner),
+            _llm_result(broken_builder),
+            _llm_result(repaired),
+        ]
+
+        result = WorkflowGenerator.generate_workflow_graph(
+            model_instance=model_instance,
+            model_parameters={},
+            provider="openai",
+            model_name="gpt-4o",
+            model_mode="chat",
+            mode="workflow",
+            instruction="x",
+        )
+
+        # Repair recovered the graph — envelope is clean but repair_attempts
+        # records the round so callers / telemetry can see it fired.
+        assert result["error"] == ""
+        assert result["errors"] == []
+        assert result["repair_attempts"] == 1
+        assert model_instance.invoke_llm.call_count == 3
+        # The final graph carries only the valid edge.
+        edge_targets = {e["target"] for e in result["graph"]["edges"]}
+        assert "ghost" not in edge_targets
+
+    def test_repair_gives_up_when_repair_also_broken(self):
+        # Same dangling-edge planner + first builder as above, but the repair
+        # response ALSO has the dangling edge → final envelope surfaces the
+        # original errors and reports repair_attempts == 1 (we tried).
+        planner = json.dumps(
+            {
+                "title": "x",
+                "description": "x",
+                "nodes": [
+                    {"label": "Start", "node_type": "start", "purpose": "x"},
+                    {"label": "End", "node_type": "end", "purpose": "x"},
+                ],
+            }
+        )
+        broken = json.dumps(
+            {
+                "nodes": [
+                    {"id": "node1", "type": "custom", "position": {"x": 0, "y": 0}, "data": {"type": "start"}},
+                    {"id": "node2", "type": "custom", "position": {"x": 0, "y": 0}, "data": {"type": "end"}},
+                ],
+                "edges": [
+                    {"id": "x", "source": "node1", "target": "node2", "type": "custom"},
+                    {"id": "y", "source": "node1", "target": "ghost", "type": "custom"},
+                ],
+                "viewport": {"x": 0, "y": 0, "zoom": 0.7},
+            }
+        )
+        model_instance = MagicMock()
+        model_instance.invoke_llm.side_effect = [
+            _llm_result(planner),
+            _llm_result(broken),
+            _llm_result(broken),  # repair returns the same broken shape
+        ]
+
+        result = WorkflowGenerator.generate_workflow_graph(
+            model_instance=model_instance,
+            model_parameters={},
+            provider="openai",
+            model_name="gpt-4o",
+            model_mode="chat",
+            mode="workflow",
+            instruction="x",
+        )
+
+        # Original errors still surface; repair_attempts proves we tried.
+        assert "ghost" in result["error"]
+        assert result["repair_attempts"] == 1
+        assert model_instance.invoke_llm.call_count == 3
+
+
+class TestWorkflowGeneratorRegenerateNode:
+    """
+    Per-node refinement: take an existing graph + node_id + free-text and
+    do a single LLM call that returns the full graph with just the target
+    node updated. Mirrors the full-graph self-repair pipeline but skips the
+    planner stage.
+    """
+
+    @pytest.fixture
+    def base_graph(self) -> dict:
+        return {
+            "nodes": [
+                {
+                    "id": "node1",
+                    "type": "custom",
+                    "position": {"x": 0, "y": 0},
+                    "data": {"type": "start", "title": "Start"},
+                },
+                {
+                    "id": "node2",
+                    "type": "custom",
+                    "position": {"x": 0, "y": 0},
+                    "data": {
+                        "type": "llm",
+                        "title": "Summarize",
+                        "model": {"name": "old-model", "provider": "openai", "mode": "chat"},
+                    },
+                },
+                {
+                    "id": "node3",
+                    "type": "custom",
+                    "position": {"x": 0, "y": 0},
+                    "data": {"type": "end", "title": "End"},
+                },
+            ],
+            "edges": [
+                {"id": "e1", "source": "node1", "target": "node2", "type": "custom"},
+                {"id": "e2", "source": "node2", "target": "node3", "type": "custom"},
+            ],
+            "viewport": {"x": 0, "y": 0, "zoom": 0.7},
+        }
+
+    def test_refines_target_node_and_returns_full_graph(self, base_graph):
+        # LLM returns the same graph with node2's model swapped — only the
+        # target node should change, edges + other nodes stay intact.
+        refined = json.dumps(
+            {
+                "nodes": [
+                    base_graph["nodes"][0],
+                    {
+                        "id": "node2",
+                        "type": "custom",
+                        "position": {"x": 0, "y": 0},
+                        "data": {
+                            "type": "llm",
+                            "title": "Summarize",
+                            "model": {"name": "new-model", "provider": "openai", "mode": "chat"},
+                        },
+                    },
+                    base_graph["nodes"][2],
+                ],
+                "edges": base_graph["edges"],
+                "viewport": base_graph["viewport"],
+            }
+        )
+        model_instance = MagicMock()
+        model_instance.invoke_llm.side_effect = [_llm_result(refined)]
+
+        result = WorkflowGenerator.regenerate_node(
+            model_instance=model_instance,
+            model_parameters={},
+            provider="openai",
+            model_name="new-model",
+            model_mode="chat",
+            mode="workflow",
+            graph=base_graph,
+            node_id="node2",
+            refinement="Switch this to new-model",
+        )
+
+        assert result["errors"] == []
+        assert result["repair_attempts"] == 0
+        assert model_instance.invoke_llm.call_count == 1
+        # Target node updated, siblings preserved.
+        ids = {n["id"]: n for n in result["graph"]["nodes"]}
+        assert ids["node2"]["data"]["model"]["name"] == "new-model"
+        assert {e["source"] for e in result["graph"]["edges"]} == {"node1", "node2"}
+
+    def test_rejects_unknown_node_id_without_llm_call(self, base_graph):
+        model_instance = MagicMock()
+        # Side effect not set — any call would explode loudly. We assert
+        # the runner short-circuits before reaching the model so callers
+        # don't burn quota on user-typed garbage.
+
+        result = WorkflowGenerator.regenerate_node(
+            model_instance=model_instance,
+            model_parameters={},
+            provider="openai",
+            model_name="gpt-4o",
+            model_mode="chat",
+            mode="workflow",
+            graph=base_graph,
+            node_id="ghost",
+            refinement="Make it faster",
+        )
+
+        assert model_instance.invoke_llm.call_count == 0
+        assert any(e["code"] == "UNKNOWN_NODE_REFERENCE" for e in result["errors"])
+        assert "ghost" in result["error"]
+
+    def test_self_repair_fires_when_refined_graph_breaks(self, base_graph):
+        # LLM "refines" by removing a required edge → validation catches a
+        # dangling reference → repair pass restores it.
+        broken_refined = json.dumps(
+            {
+                "nodes": base_graph["nodes"],
+                "edges": [
+                    {"id": "e1", "source": "node1", "target": "node2", "type": "custom"},
+                    {"id": "bad", "source": "node2", "target": "ghost", "type": "custom"},
+                ],
+                "viewport": base_graph["viewport"],
+            }
+        )
+        clean_refined = json.dumps(
+            {
+                "nodes": base_graph["nodes"],
+                "edges": base_graph["edges"],
+                "viewport": base_graph["viewport"],
+            }
+        )
+        model_instance = MagicMock()
+        model_instance.invoke_llm.side_effect = [
+            _llm_result(broken_refined),
+            _llm_result(clean_refined),
+        ]
+
+        result = WorkflowGenerator.regenerate_node(
+            model_instance=model_instance,
+            model_parameters={},
+            provider="openai",
+            model_name="gpt-4o",
+            model_mode="chat",
+            mode="workflow",
+            graph=base_graph,
+            node_id="node2",
+            refinement="Tighten the prompt",
+        )
+
+        assert result["errors"] == []
+        assert result["repair_attempts"] == 1
+        assert model_instance.invoke_llm.call_count == 2
+
+
 class TestWorkflowGeneratorEdgeCases:
     """
     Smaller behaviours that aren't part of the happy path but matter for

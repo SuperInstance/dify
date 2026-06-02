@@ -58,6 +58,22 @@ class WorkflowGeneratePayload(BaseModel):
     model_config_data: ModelConfig = Field(..., alias="model_config", description="Model configuration")
 
 
+class WorkflowRegenerateNodePayload(BaseModel):
+    """Payload for per-node refinement of an existing generated graph.
+
+    The frontend ships the current preview graph alongside the target node
+    id and the user's free-text refinement. Returns the SAME envelope as
+    ``/workflow-generate`` — full graph + errors + repair_attempts — so
+    the frontend can re-use the existing rendering path.
+    """
+
+    mode: Literal["workflow", "advanced-chat"] = Field(..., description="Target app mode for the graph")
+    graph: dict = Field(..., description="Current graph: {nodes, edges, viewport}")
+    node_id: str = Field(..., description="Id of the node to refine; must exist in graph.nodes")
+    refinement: str = Field(..., description="Free-text instruction describing the desired change")
+    model_config_data: ModelConfig = Field(..., alias="model_config", description="Model configuration")
+
+
 register_enum_models(console_ns, LLMMode)
 register_schema_models(
     console_ns,
@@ -67,6 +83,7 @@ register_schema_models(
     InstructionGeneratePayload,
     InstructionTemplatePayload,
     WorkflowGeneratePayload,
+    WorkflowRegenerateNodePayload,
     ModelConfig,
 )
 
@@ -323,6 +340,64 @@ class WorkflowGenerateApi(Resource):
                 instruction=args.instruction,
                 model_config=args.model_config_data,
                 ideal_output=args.ideal_output,
+            )
+        except ProviderTokenNotInitError as ex:
+            raise ProviderNotInitializeError(ex.description)
+        except QuotaExceededError:
+            raise ProviderQuotaExceededError()
+        except ModelCurrentlyNotSupportError:
+            raise ProviderModelCurrentlyNotSupportError()
+        except InvokeError as e:
+            raise CompletionRequestError(e.description)
+
+        return result
+
+
+@console_ns.route("/workflow-generate-node")
+class WorkflowRegenerateNodeApi(Resource):
+    """Refine one node of a generated workflow graph in place.
+
+    Sibling of ``/workflow-generate`` — same envelope contract, smaller scope.
+    Used by the preview canvas's "Refine" affordance so the user can iterate
+    on a single node without re-running the full planner + builder pipeline.
+    """
+
+    @console_ns.doc("regenerate_workflow_node")
+    @console_ns.doc(description="Refine one node of an existing generated workflow graph")
+    @console_ns.expect(console_ns.models[WorkflowRegenerateNodePayload.__name__])
+    @console_ns.response(200, "Node refinement completed")
+    @console_ns.response(400, "Invalid request parameters")
+    @console_ns.response(402, "Provider quota exceeded")
+    @setup_required
+    @login_required
+    @account_initialization_required
+    @with_current_tenant_id
+    def post(self, current_tenant_id: str):
+        args = WorkflowRegenerateNodePayload.model_validate(console_ns.payload)
+
+        # Reject empty refinements and empty / unknown node_ids at the boundary —
+        # the runner would surface these as envelope errors anyway, but a 400
+        # at the controller saves a model_manager lookup + tool catalogue
+        # build for input the user clearly hasn't filled out.
+        if not args.refinement.strip():
+            return {
+                "error": "Refinement is required",
+                "errors": [{"code": "EMPTY_INSTRUCTION", "detail": "Refinement is required"}],
+            }, 400
+        if not args.node_id.strip():
+            return {
+                "error": "node_id is required",
+                "errors": [{"code": "EMPTY_INSTRUCTION", "detail": "node_id is required"}],
+            }, 400
+
+        try:
+            result = WorkflowGeneratorService.regenerate_node(
+                tenant_id=current_tenant_id,
+                mode=args.mode,
+                graph=args.graph,
+                node_id=args.node_id,
+                refinement=args.refinement,
+                model_config=args.model_config_data,
             )
         except ProviderTokenNotInitError as ex:
             raise ProviderNotInitializeError(ex.description)

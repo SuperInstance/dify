@@ -12,13 +12,14 @@ createApp) rather than from inside another workflow.
 """
 
 import logging
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, cast
 
 from core.app.app_config.entities import ModelConfig
 from core.model_manager import ModelManager
 from core.workflow.generator import WorkflowGenerator
 from core.workflow.generator.tool_catalogue import build_tool_catalogue, format_tool_catalogue, installed_tool_keys
-from core.workflow.generator.types import WorkflowGenerateResultDict, WorkflowGenerationMode
+from core.workflow.generator.types import GraphDict, WorkflowGenerateResultDict, WorkflowGenerationMode
 from graphon.model_runtime.entities.model_entities import ModelType
 
 logger = logging.getLogger(__name__)
@@ -86,5 +87,55 @@ class WorkflowGeneratorService:
             instruction=instruction,
             ideal_output=ideal_output,
             tool_catalogue_text=tool_catalogue_text,
+            installed_tools=installed_tools,
+        )
+
+    @classmethod
+    def regenerate_node(
+        cls,
+        *,
+        tenant_id: str,
+        mode: WorkflowGenerationMode,
+        graph: Mapping[str, Any],
+        node_id: str,
+        refinement: str,
+        model_config: ModelConfig,
+    ) -> WorkflowGenerateResultDict:
+        """
+        Resolve a model instance for the tenant and refine one node of a graph.
+
+        Mirrors ``generate_workflow_graph``'s plumbing: tool catalogue is
+        built best-effort so the validator can still reject a refinement
+        that introduces an uninstalled tool. The graph payload comes in as
+        a permissive ``Mapping`` because the controller layer parses it
+        from JSON — we cast to ``GraphDict`` for the runner contract.
+        """
+        model_manager = ModelManager.for_tenant(tenant_id=tenant_id)
+        model_instance = model_manager.get_model_instance(
+            tenant_id=tenant_id,
+            model_type=ModelType.LLM,
+            provider=model_config.provider,
+            model=model_config.name,
+        )
+
+        model_parameters: dict[str, Any] = dict(model_config.completion_params or {})
+
+        installed_tools: set[tuple[str, str]] | None = None
+        try:
+            entries = build_tool_catalogue(tenant_id)
+            installed_tools = installed_tool_keys(entries)
+        except Exception:
+            logger.exception("Workflow generator: failed to build tool catalogue for tenant %s", tenant_id)
+
+        return WorkflowGenerator.regenerate_node(
+            model_instance=model_instance,
+            model_parameters=model_parameters,
+            provider=model_config.provider,
+            model_name=model_config.name,
+            model_mode=str(model_config.mode),
+            mode=mode,
+            graph=cast(GraphDict, graph),
+            node_id=node_id,
+            refinement=refinement,
             installed_tools=installed_tools,
         )

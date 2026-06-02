@@ -119,7 +119,96 @@ def _empty_result() -> WorkflowGenerateResultDict:
         "icon": "",
         "error": "",
         "errors": [],
+        "repair_attempts": 0,
     }
+
+
+# System prompt fragment used by the self-repair pass — purposely terse since
+# the user message carries the broken graph and the specific errors. The
+# repair LLM call inherits the builder's mode-specific system prompt for the
+# domain rules (node shapes, edge handles, variable-reference syntax) so we
+# don't restate them here.
+_REPAIR_SYSTEM_PROMPT_SUFFIX = (
+    "\n\n# Self-repair pass\n\n"
+    "You have already produced a graph that failed structural validation. The "
+    "user message below lists the SPECIFIC errors and the graph that produced "
+    "them. Return a CORRECTED graph as a single JSON object with the same "
+    "``{nodes, edges, viewport}`` shape. Only fix the listed errors — do not "
+    "rename nodes, change models, or restructure the workflow beyond what's "
+    "needed to clear each error.\n"
+)
+
+
+# System prompt fragment used by the per-node regenerate pass. Same shape
+# contract as the repair pass: inherit the builder's full system prompt then
+# constrain the output to ONLY modify the target node.
+_NODE_REGENERATE_SUFFIX = (
+    "\n\n# Per-node refinement pass\n\n"
+    "Refine ONLY the node whose id is specified in the user message. Return "
+    "the COMPLETE graph as a single JSON object with the same "
+    "``{nodes, edges, viewport}`` shape. All other nodes' ids, configs, "
+    "and the entire edges list MUST stay byte-identical to the input graph "
+    "— do not rename, reposition, or reconfigure them. If the refinement "
+    "changes what the target node exposes (e.g. an LLM node's structured "
+    "output schema), upstream/downstream variable references stay as-is; "
+    "the user will reconcile downstream consumers in a follow-up step.\n"
+)
+
+
+def _format_regenerate_user_prompt(
+    *,
+    graph: GraphDict,
+    node_id: str,
+    refinement: str,
+    provider: str,
+    model_name: str,
+    model_mode: str,
+) -> str:
+    """Build the user prompt for a per-node regenerate call."""
+    graph_payload = {
+        "nodes": graph.get("nodes", []),
+        "edges": graph.get("edges", []),
+        "viewport": graph.get("viewport"),
+    }
+    return (
+        f"# Target node id\n\n{node_id}\n\n"
+        f"# Refinement instruction\n\n{refinement.strip()}\n\n"
+        f"# Selected model (use for the refined node if it is LLM-based)\n\n"
+        f"provider={provider}, name={model_name}, mode={model_mode}\n\n"
+        f"# Current graph\n\n```json\n{json.dumps(graph_payload, ensure_ascii=False)}\n```\n\n"
+        f"Return the refined graph JSON now.\n"
+    )
+
+
+def _format_repair_user_prompt(
+    *,
+    instruction: str,
+    graph: GraphDict,
+    errors: list[WorkflowGenerateErrorDict],
+) -> str:
+    """Build the user prompt for the repair LLM call.
+
+    Lists each error on its own line with the node id (when present) so the
+    model can locate it in the graph JSON below. Errors come as
+    machine-readable codes too because the model may have learned to ground
+    on those across many repair rounds.
+    """
+    error_lines: list[str] = []
+    for e in errors:
+        node = f" [node {e['node_id']!r}]" if e.get("node_id") else ""
+        error_lines.append(f"- {e['code']}: {e['detail']}{node}")
+    graph_payload = {
+        "nodes": graph.get("nodes", []),
+        "edges": graph.get("edges", []),
+        "viewport": graph.get("viewport"),
+    }
+    return (
+        f"# Original instruction\n\n{instruction.strip()}\n\n"
+        f"# Validation errors\n\n{chr(10).join(error_lines)}\n\n"
+        f"# Current (broken) graph\n\n```json\n"
+        f"{json.dumps(graph_payload, ensure_ascii=False)}\n"
+        f"```\n\nReturn the corrected graph JSON now.\n"
+    )
 
 
 def _result_with_errors(
@@ -259,17 +348,239 @@ class WorkflowGenerator:
             "icon": str(plan.get("icon") or "").strip(),
             "error": "",
             "errors": [],
+            "repair_attempts": 0,
         }
 
         # Final structural sanity check — fail closed if start/end shape is
         # wrong, container topology is broken, a tool was hallucinated, or a
-        # variable reference points at a node that won't expose it. We still
-        # return the partial graph so the caller can debug or salvage it.
+        # variable reference points at a node that won't expose it.
         structural_errors = cls._validate_structure(graph=graph, mode=mode, installed_tools=installed_tools)
+
+        # ── 4. SELF-REPAIR (one-shot) ─────────────────────────────────────
+        # When the builder's first attempt has fixable structural issues we
+        # send them back to the model with the broken graph and ask for a
+        # corrected one. Capped at a single attempt — the dominant failure
+        # mode is a dangling edge / missing terminal / unknown reference,
+        # which the model usually fixes on the first follow-up. Burning
+        # more rounds rarely improves outcomes and silently doubles cost.
+        if structural_errors:
+            repaired = cls._repair_graph(
+                model_instance=model_instance,
+                model_parameters=model_parameters,
+                mode=mode,
+                instruction=instruction,
+                graph=graph,
+                errors=structural_errors,
+            )
+            result["repair_attempts"] = 1
+            if repaired is not None:
+                graph = cls._postprocess_graph(graph=repaired, mode=mode)
+                result["graph"] = graph
+                structural_errors = cls._validate_structure(
+                    graph=graph, mode=mode, installed_tools=installed_tools
+                )
+                if not structural_errors:
+                    logger.info("Workflow generator: self-repair fixed all errors")
+                else:
+                    logger.info(
+                        "Workflow generator: self-repair reduced errors from initial set; %d remain",
+                        len(structural_errors),
+                    )
+
         if structural_errors:
             logger.warning("Workflow generator: structural validation failed: %s", structural_errors)
             return _result_with_errors(result, structural_errors)
         return result
+
+    @classmethod
+    def _repair_graph(
+        cls,
+        *,
+        model_instance,
+        model_parameters: dict[str, Any],
+        mode: WorkflowGenerationMode,
+        instruction: str,
+        graph: GraphDict,
+        errors: list[WorkflowGenerateErrorDict],
+    ) -> GraphDict | None:
+        """One-shot LLM call to fix a graph that failed validation.
+
+        Returns the parsed graph dict on success, ``None`` when the repair
+        LLM call itself fails (JSON parse, schema, network) — the caller
+        falls back to surfacing the original errors so a flaky repair pass
+        never blocks the user from seeing what went wrong.
+
+        We reuse the builder's mode-specific system prompt so the model
+        still has all the node-shape rules in context; the user prompt
+        supplies the broken graph + error list.
+        """
+        system_prompt = get_builder_system_prompt(mode) + _REPAIR_SYSTEM_PROMPT_SUFFIX
+        user_prompt = _format_repair_user_prompt(instruction=instruction, graph=graph, errors=errors)
+        messages = [
+            SystemPromptMessage(content=system_prompt),
+            UserPromptMessage(content=user_prompt),
+        ]
+        try:
+            parsed = cls._invoke_and_parse_json(
+                model_instance=model_instance,
+                messages=messages,
+                model_parameters=model_parameters,
+                stage="Repair",
+            )
+        except (_StageJSONError, _StageSchemaError) as e:
+            logger.warning("Workflow generator: repair pass JSON/schema failed: %s", e)
+            return None
+        except Exception:
+            logger.exception("Workflow generator: repair pass invoke failed")
+            return None
+
+        nodes = parsed.get("nodes")
+        edges = parsed.get("edges")
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            logger.warning("Workflow generator: repair pass returned malformed graph")
+            return None
+
+        viewport = parsed.get("viewport") or _DEFAULT_VIEWPORT
+        return cast(GraphDict, {"nodes": nodes, "edges": edges, "viewport": viewport})
+
+    @classmethod
+    def regenerate_node(
+        cls,
+        *,
+        model_instance,
+        model_parameters: dict[str, Any],
+        provider: str,
+        model_name: str,
+        model_mode: str,
+        mode: WorkflowGenerationMode,
+        graph: GraphDict,
+        node_id: str,
+        refinement: str,
+        installed_tools: set[tuple[str, str]] | None = None,
+    ) -> WorkflowGenerateResultDict:
+        """
+        Refine one node of an existing graph in place via a single LLM call.
+
+        Mirrors ``generate_workflow_graph``'s envelope contract but skips the
+        planner step — the user already has a working graph and just wants to
+        nudge one node (swap a model, tighten a prompt, switch a tool). The
+        LLM is instructed to leave everything else byte-identical so we can
+        cheaply validate the result without comparing the whole graph.
+
+        Reuses the existing self-repair loop: if the refined graph fails
+        structural validation we send the errors back for one corrective
+        round, exactly like the full-graph path.
+
+        ``installed_tools`` is the tool-catalogue gate (None disables it),
+        same semantics as ``generate_workflow_graph``. The catalogue text
+        isn't surfaced in this prompt because the LLM already has the
+        current graph as context — it can see what tools are in play.
+        """
+        nodes_in: list[dict[str, Any]] = list(cast(list[dict[str, Any]], graph.get("nodes", [])))
+        if not any(n.get("id") == node_id for n in nodes_in):
+            return _result_with_errors(
+                _empty_result(),
+                [
+                    _err(
+                        WorkflowGenerateErrorCode.UNKNOWN_NODE_REFERENCE,
+                        f"Node {node_id!r} not found in graph",
+                        node_id=node_id,
+                    )
+                ],
+            )
+
+        system_prompt = get_builder_system_prompt(mode) + _NODE_REGENERATE_SUFFIX
+        user_prompt = _format_regenerate_user_prompt(
+            graph=graph,
+            node_id=node_id,
+            refinement=refinement,
+            provider=provider,
+            model_name=model_name,
+            model_mode=model_mode,
+        )
+        messages = [
+            SystemPromptMessage(content=system_prompt),
+            UserPromptMessage(content=user_prompt),
+        ]
+
+        # Wrap the LLM call in the same stage-error envelope as generate_workflow_graph
+        # so JSON / schema / model errors surface uniformly to the controller.
+        refined, refine_err = cls._run_stage(
+            stage="Refine",
+            failure_fallback_message="Failed to refine node",
+            run=lambda: cls._parse_graph_response(
+                model_instance=model_instance,
+                messages=messages,
+                model_parameters=model_parameters,
+            ),
+        )
+        if refine_err is not None:
+            return _result_with_errors(_empty_result(), [refine_err])
+        refined = cast(GraphDict, refined)
+
+        result: WorkflowGenerateResultDict = {
+            "graph": cls._postprocess_graph(graph=refined, mode=mode),
+            "message": "",
+            "app_name": "",
+            "icon": "",
+            "error": "",
+            "errors": [],
+            "repair_attempts": 0,
+        }
+
+        # Same self-repair pipeline as the full-graph path. A refined graph
+        # that breaks (e.g. the LLM accidentally removed an edge) gets ONE
+        # corrective round before we surface errors to the user.
+        structural_errors = cls._validate_structure(
+            graph=result["graph"], mode=mode, installed_tools=installed_tools
+        )
+        if structural_errors:
+            repaired = cls._repair_graph(
+                model_instance=model_instance,
+                model_parameters=model_parameters,
+                mode=mode,
+                instruction=refinement,
+                graph=result["graph"],
+                errors=structural_errors,
+            )
+            result["repair_attempts"] = 1
+            if repaired is not None:
+                result["graph"] = cls._postprocess_graph(graph=repaired, mode=mode)
+                structural_errors = cls._validate_structure(
+                    graph=result["graph"], mode=mode, installed_tools=installed_tools
+                )
+
+        if structural_errors:
+            return _result_with_errors(result, structural_errors)
+        return result
+
+    @classmethod
+    def _parse_graph_response(
+        cls,
+        *,
+        model_instance,
+        messages,
+        model_parameters: dict[str, Any],
+    ) -> GraphDict:
+        """Helper that wraps the LLM call + JSON parse + minimal shape check.
+
+        Pulled out of ``_run_builder`` / ``regenerate_node`` so both stages
+        share one path for parsing a ``{nodes, edges, viewport}`` response.
+        Raises the same ``_StageJSONError`` / ``_StageSchemaError`` the
+        outer ``_run_stage`` wrapper translates into envelope error codes.
+        """
+        parsed = cls._invoke_and_parse_json(
+            model_instance=model_instance,
+            messages=messages,
+            model_parameters=model_parameters,
+            stage="Graph",
+        )
+        nodes = parsed.get("nodes")
+        edges = parsed.get("edges")
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            raise _StageSchemaError("Graph", "graph missing 'nodes' or 'edges' arrays")
+        viewport = parsed.get("viewport") or _DEFAULT_VIEWPORT
+        return cast(GraphDict, {"nodes": nodes, "edges": edges, "viewport": viewport})
 
     @classmethod
     def _run_stage(
