@@ -40,6 +40,9 @@ from .dataset.rag_pipeline import rag_pipeline_workflow
 from .end_user import end_user
 from .workspace import models
 
+# 🏆 SuperInstance Enhancement: Budget Watchdog
+from .budget_watchdog.controller import budget_ns
+
 __all__ = [
     "annotation",
     "app",
@@ -62,6 +65,8 @@ __all__ = [
     "site",
     "workflow",
     "workflow_events",
+    "budget_ns",
 ]
 
 api.add_namespace(service_api_ns)
+api.add_namespace(budget_ns)

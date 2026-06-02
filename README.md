@@ -209,6 +209,41 @@ At the same time, please consider supporting Dify by sharing it on social media 
   <img src="https://contrib.rocks/image?repo=langgenius/dify" />
 </a>
 
+## 🏆 SuperInstance Enhancement: Budget Watchdog
+
+> **Same Dify. Won't bankrupt your team.**
+
+The Budget Watchdog adds API spending limits to Dify. Set per-workflow and team-level budgets, get warned before you exceed them, and let models auto-downgrade when you're getting close.
+
+### Key Features
+
+- **Per-workflow token/cost tracking** with daily/weekly/monthly windows
+- **Three-phase enforcement**: 60% warning → 85% throttle → 100% stop
+- **Auto-downgrade**: GPT-4o → GPT-4o-mini → GPT-3.5 Turbo (and Claude, Gemini, Llama chains)
+- **Team budget aggregation** with per-member quotas
+- **Alert store** with ring buffer for audit trail
+- **REST API** for configuration and inspection
+- **GraphEngine layer** hooks into existing workflow execution alongside LLMQuotaLayer
+
+### Quick Start
+
+```bash
+# Configure a workflow budget
+curl -X POST https://your-dify/v1/budgets \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "workflow_name": "customer-support", "model": "gpt-4o",
+        "token_limit": 1000000, "cost_limit_cents": 50000 }'
+
+# Check budget status
+curl https://your-dify/v1/budgets/customer-support \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+See [INTEGRATION.md](./INTEGRATION.md) for full documentation.
+
+---
+
 ## Star history
 
 [![Star History Chart](https://api.star-history.com/svg?repos=langgenius/dify&type=Date)](https://star-history.com/#langgenius/dify&Date)
