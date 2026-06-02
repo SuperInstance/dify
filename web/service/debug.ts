@@ -157,6 +157,37 @@ export const generateWorkflow = (body: GenerateWorkflowBody, options?: GenerateW
   return post<GenerateWorkflowResponse>('/workflow-generate', { body })
 }
 
+export type RegenerateWorkflowNodeBody = {
+  mode: 'workflow' | 'advanced-chat'
+  graph: {
+    nodes: Node[]
+    edges: Edge[]
+    viewport: Viewport
+  }
+  node_id: string
+  refinement: string
+  model_config: GenerateWorkflowBody['model_config']
+}
+
+/**
+ * Refine ONE node of a previously-generated graph. Returns the same
+ * envelope as ``generateWorkflow``: full graph (with the target node
+ * updated, sibling nodes byte-identical), plus ``errors`` /
+ * ``repair_attempts``. The frontend can hand the result to
+ * ``addVersion`` so the preview just renders the new graph.
+ */
+export const regenerateWorkflowNode = (
+  body: RegenerateWorkflowNodeBody,
+  options?: GenerateWorkflowOptions,
+) => {
+  if (options?.getAbortController) {
+    return post<GenerateWorkflowResponse>('/workflow-generate-node', { body }, {
+      getAbortController: options.getAbortController,
+    })
+  }
+  return post<GenerateWorkflowResponse>('/workflow-generate-node', { body })
+}
+
 export const fetchPromptTemplate = ({
   appMode,
   mode,
