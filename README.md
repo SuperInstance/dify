@@ -1,5 +1,7 @@
 ![cover-v5-optimized](./images/GitHub_README_if.png)
 
+> **🏷️ SuperInstance Fork** — This is the [SuperInstance](https://github.com/SuperInstance) fork of [Dify](https://github.com/langgenius/dify), configured with **z.ai GLM-5.1** as the default provider and **DeepInfra** as fallback. Includes our Budget Watchdog for cost management. See [SUPERINSTANCE_CHANGES.md](./SUPERINSTANCE_CHANGES.md) for details.
+
 <p align="center">
   <a href="https://cloud.dify.ai">Dify Cloud</a> ·
   <a href="https://docs.dify.ai/getting-started/install-self-hosted">Self-hosting</a> ·
@@ -396,6 +398,32 @@ When a budget transitions to PreTransition (≥60%) or Transitioning (≥85%), t
 - All state lives on the `BudgetWatchdogLayer` class — configure once, enforce everywhere
 
 See [INTEGRATION.md](./INTEGRATION.md) for the full API reference and production migration guide.
+
+---
+
+## 🧬 SuperInstance Provider Configuration
+
+This fork replaces OpenAI/Anthropic defaults with our own provider stack:
+
+| Role | Provider | Model | Use Case |
+|------|----------|-------|----------|
+| **Primary** | z.ai | GLM-5.1 | All tasks — best quality |
+| **Fallback** | DeepInfra | seed-2.0-mini | Fast/cheap tasks |
+| **Fallback** | DeepInfra | gemma-4 | General purpose |
+| **Fallback** | DeepInfra | nemotron-120b | Complex reasoning |
+| **Fallback** | DeepInfra | qwen-3.6 | Multilingual |
+| **Fallback** | DeepInfra | hermes-405b | Maximum capability |
+
+**Quick setup:**
+
+```bash
+cp docker/envs/superinstance-models.env.example docker/envs/superinstance-models.env
+# Edit with your API keys
+vim docker/envs/superinstance-models.env
+docker compose up -d
+```
+
+See [SUPERINSTANCE_CHANGES.md](./SUPERINSTANCE_CHANGES.md) for full details.
 
 ---
 
